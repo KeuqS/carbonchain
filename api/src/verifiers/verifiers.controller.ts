@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Body,
-  ConflictException,
   Controller,
   ForbiddenException,
   Get,
@@ -14,10 +13,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import {
+  ApiBearerAuth,
+  ApiBody,
   ApiTags,
   ApiOperation,
   ApiResponse,
-  ApiBearerAuth,
 } from '@nestjs/swagger';
 import { StrKey } from '@stellar/stellar-sdk';
 import { VerifiersService, VerifierInfo } from './verifiers.service';
@@ -28,6 +28,17 @@ import {
 import { CreditMetadata, VerifierReputation } from '../../../shared';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AdminGuard } from '../admin/admin.guard';
+import {
+  MinStakeResponseDto,
+  StakeDepositRequestDto,
+  StakeResponseDto,
+  StakeWithdrawRequestDto,
+  VerifierApplicationRequestDto,
+  VerifierApplicationResponseDto,
+  VerifierApplicationReviewRequestDto,
+  VerifierReputationResponseDto,
+  VerifierResponseDto,
+} from './verifiers.dto';
 
 @ApiTags('verifiers')
 @Controller('verifiers')
@@ -35,7 +46,12 @@ export class VerifiersController {
   constructor(private readonly verifiersService: VerifiersService) {}
 
   @ApiOperation({ summary: 'List all registered verifiers' })
-  @ApiResponse({ status: 200, description: 'List of verifiers' })
+  @ApiResponse({
+    status: 200,
+    description: 'List of verifiers',
+    type: VerifierResponseDto,
+    isArray: true,
+  })
   @Get()
   listVerifiers(): Promise<VerifierInfo[]> {
     return this.verifiersService.listVerifiers();
@@ -50,6 +66,7 @@ export class VerifiersController {
   @ApiResponse({
     status: 200,
     description: 'Minimum stake in stroops (1 XLM = 10,000,000 stroops)',
+    type: MinStakeResponseDto,
   })
   @Get('min-stake')
   getMinStake(): Promise<{ minStake: string }> {
@@ -57,7 +74,12 @@ export class VerifiersController {
   }
 
   @ApiOperation({ summary: 'Get verifier by address' })
-  @ApiResponse({ status: 200, description: 'Verifier info' })
+  @ApiResponse({
+    status: 200,
+    description: 'Verifier info',
+    type: VerifierResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid Stellar address' })
   @ApiResponse({ status: 404, description: 'Verifier not found' })
   @Get(':address')
   getVerifier(@Param('address') address: string): Promise<VerifierInfo> {
@@ -71,6 +93,7 @@ export class VerifiersController {
     status: 403,
     description: 'Forbidden - can only view own pending credits',
   })
+  @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Get(':address/pending')
   async getPendingCredits(
@@ -93,6 +116,7 @@ export class VerifiersController {
     status: 403,
     description: 'Forbidden - can only view own approval history',
   })
+  @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   @Get(':address/history')
   async getApprovalHistory(
@@ -114,6 +138,11 @@ export class VerifiersController {
     status: 403,
     description: 'Not a registered verifier or caller mismatch',
   })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid credit or approval request',
+  })
+  @ApiResponse({ status: 404, description: 'Verifier or credit not found' })
   @ApiResponse({
     status: 409,
     description: 'Verifier has already approved this credit',
@@ -139,6 +168,7 @@ export class VerifiersController {
     status: 200,
     description:
       'Returns { address, approvalCount, disputeCount } for the verifier.',
+    type: VerifierReputationResponseDto,
   })
   @ApiResponse({
     status: 400,
@@ -172,7 +202,9 @@ export class VerifiersController {
   @ApiResponse({
     status: 200,
     description: 'Stake in stroops. 0 if the verifier has no locked stake.',
+    type: StakeResponseDto,
   })
+  @ApiResponse({ status: 400, description: 'Invalid Stellar address' })
   @Get(':address/stake')
   async getStake(
     @Param('address') address: string,
@@ -202,9 +234,23 @@ export class VerifiersController {
     description:
       'The :address path param is informational only — the account credited is always the authenticated caller.',
   })
-  @ApiResponse({ status: 200, description: 'Updated stake after deposit' })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated stake after deposit',
+    type: StakeResponseDto,
+  })
   @ApiResponse({ status: 400, description: 'Invalid address or amount' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({
+    status: 404,
+    description: 'Verifier or stake token not found',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Stake deposit conflicts with the current nonce',
+  })
+  @ApiBearerAuth()
+  @ApiBody({ type: StakeDepositRequestDto })
   @UseGuards(JwtAuthGuard)
   @Post(':address/stake/deposit')
   @HttpCode(200)
@@ -245,6 +291,17 @@ export class VerifiersController {
     description: 'No unbonding request or unbonding period not elapsed',
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({
+    status: 404,
+    description: 'Verifier or stake token not found',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'Withdrawal conflicts with the current nonce or unbonding state',
+  })
+  @ApiBearerAuth()
+  @ApiBody({ type: StakeWithdrawRequestDto })
   @UseGuards(JwtAuthGuard)
   @Post(':address/stake/withdraw')
   @HttpCode(200)
@@ -272,25 +329,29 @@ export class VerifiersController {
   // ── Applications (Issue #967) ───────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Submit a verifier application' })
-  @ApiResponse({ status: 201, description: 'Application submitted' })
+  @ApiResponse({
+    status: 201,
+    description: 'Application submitted',
+    type: VerifierApplicationResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid application payload' })
   @ApiResponse({ status: 409, description: 'Application already pending' })
+  @ApiBody({ type: VerifierApplicationRequestDto })
   @Post('applications')
   async submitApplication(
     @Body()
-    body: {
-      address: string;
-      name: string;
-      capabilities: string[];
-      documentsCid: string;
-      stakeToken: string;
-      stakeAmount: string;
-    },
+    body: VerifierApplicationRequestDto,
   ): Promise<VerifierApplicationEntity> {
     return this.verifiersService.submitApplication(body);
   }
 
   @ApiOperation({ summary: 'Get verifier application status' })
-  @ApiResponse({ status: 200, description: 'Application details' })
+  @ApiResponse({
+    status: 200,
+    description: 'Application details',
+    type: VerifierApplicationResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid Stellar address' })
   @ApiResponse({ status: 404, description: 'No application found' })
   @Get('applications/:address')
   async getApplication(
@@ -300,7 +361,14 @@ export class VerifiersController {
   }
 
   @ApiOperation({ summary: 'List pending verifier applications (admin)' })
-  @ApiResponse({ status: 200, description: 'List of applications' })
+  @ApiResponse({
+    status: 200,
+    description: 'List of applications',
+    type: VerifierApplicationResponseDto,
+    isArray: true,
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, AdminGuard)
   @Get('admin/applications')
@@ -317,9 +385,21 @@ export class VerifiersController {
   }
 
   @ApiOperation({ summary: 'Approve or reject a verifier application (admin)' })
-  @ApiResponse({ status: 200, description: 'Application updated' })
+  @ApiResponse({
+    status: 200,
+    description: 'Application updated',
+    type: VerifierApplicationResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid review status' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Admin access required' })
   @ApiResponse({ status: 404, description: 'Application not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Application cannot be reviewed in its current state',
+  })
   @ApiBearerAuth()
+  @ApiBody({ type: VerifierApplicationReviewRequestDto })
   @UseGuards(JwtAuthGuard, AdminGuard)
   @Post('admin/applications/:address/review')
   async reviewApplication(
